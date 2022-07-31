@@ -36,7 +36,7 @@ public class TestingContext {
 
 	private static final AsyncWorker async = new AsyncWorker();
 
-	private static int mode = 2; // 0 does work (it does not call glCopyImageSubData),
+	private static int mode = 0; // 0 does work (it does not call glCopyImageSubData),
 								 // 1 does not work (resizing can cause it to sometimes render, but very rarely
 								 // and not the entire screen but just a part),
 								 // 2 does not work (works at first, but breaks
