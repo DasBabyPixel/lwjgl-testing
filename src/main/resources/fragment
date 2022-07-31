@@ -1,0 +1,16 @@
+#version 320 es
+
+in vec2 outTexCoord;
+in vec3 mvPos;
+out vec4 fragColor;
+
+uniform sampler2D texture_sampler;
+uniform vec4 color;
+uniform vec4 textureAddColor;
+
+void main()
+{
+    vec4 fc = color * (textureAddColor + texture(texture_sampler, outTexCoord));
+    
+    fragColor = fc;
+}
