@@ -30,13 +30,23 @@ public class TestingContext {
 
 	private static final boolean disableExplicitVersion = false;
 
-	private static final GLFWThread glfw = new GLFWThread();
+//	private static final GLFWThread glfw = new GLFWThread();
 
 	private static final RenderThread render = new RenderThread();
 
 	private static final AsyncWorker async = new AsyncWorker();
 
-	private static int mode = 0; // 0 does work (it does not call glCopyImageSubData),
+	private static volatile long mainWindow;
+
+	private static volatile long secondary;
+
+	private static volatile int fbwidth;
+
+	private static volatile int fbheight;
+
+	private static volatile boolean exit = false;
+
+	private static int mode = 1; // 0 does work (it does not call glCopyImageSubData),
 								 // 1 does not work (resizing can cause it to sometimes render, but very rarely
 								 // and not the entire screen but just a part),
 								 // 2 does not work (works at first, but breaks
@@ -46,19 +56,71 @@ public class TestingContext {
 		Configuration.OPENGLES_EXPLICIT_INIT.set(true);
 		Configuration.OPENGL_EXPLICIT_INIT.set(true);
 
-		GL.create(); // Hack to use GL ES. I want to do this so I only use ES functions to be able to
-					 // port to android later without problems and recoding a lot of things
+		GL.create();
+		glfwInit();
+		GLFWErrorCallback.createPrint().set();
 
-		glfw.start();
-		glfw.latch.await(); // Wait for windows to be created
+		// Window hints to use opengl es and core profile
+		glfwDefaultWindowHints();
+		glfwWindowHint(GLFW_VISIBLE, GLFW_FALSE);
+		glfwWindowHint(GLFW_TRANSPARENT_FRAMEBUFFER, GLFW_TRUE);
+
+		if (!disableExplicitVersion) {
+			// These two lines are part of the problem, remove them and it works.
+			glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
+			glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 6);
+		}
+
+		mainWindow = glfwCreateWindow(400, 400, "testing", 0, 0);
+		secondary = glfwCreateWindow(1, 1, "unused", 0, mainWindow);
+
+		glfwSetFramebufferSizeCallback(mainWindow, new GLFWFramebufferSizeCallbackI() {
+
+			@Override
+			public void invoke(long window, int width, int height) {
+				fbwidth = width;
+				fbheight = height;
+
+				// Signal redraw
+				render.render = true;
+				LockSupport.unpark(render);
+			}
+
+		});
+		glfwSetWindowCloseCallback(mainWindow, new GLFWWindowCloseCallbackI() {
+
+			@Override
+			public void invoke(long window) {
+				render.exit = true;
+				render.render = true;
+				LockSupport.unpark(render);
+			}
+
+		});
+		IntBuffer w = memAllocInt(1);
+		IntBuffer h = memAllocInt(1);
+		glfwGetFramebufferSize(mainWindow, w, h);
+		fbwidth = w.get(0);
+		fbheight = h.get(0);
+		memFree(w);
+		memFree(h);
+
+		glfwShowWindow(mainWindow);
+
 		async.start();
 		render.start();
 
-		render.join();
-		async.join();
-		glfw.exit = true;
-		glfw.join();
+		while (!exit) {
+			glfwWaitEventsTimeout(0.1D); // With timeout to allow exit even on no new events. glfwPostEmptyEvent is
+										 // bugged idk why
+			glfwPollEvents();
+		}
+
+		glfwDestroyWindow(mainWindow);
+		glfwDestroyWindow(secondary);
+
 		GL.destroy();
+		glfwTerminate();
 	}
 
 	private static void createCapabilities() {
@@ -79,7 +141,7 @@ public class TestingContext {
 
 		@Override
 		public void run() {
-			glfwMakeContextCurrent(glfw.secondary);
+			glfwMakeContextCurrent(secondary);
 			createCapabilities();
 
 			System.out.println(glGetInteger(GL_MAJOR_VERSION) + "." + glGetInteger(GL_MINOR_VERSION));
@@ -176,7 +238,7 @@ public class TestingContext {
 
 		@Override
 		public void run() {
-			glfwMakeContextCurrent(glfw.mainWindow);
+			glfwMakeContextCurrent(mainWindow);
 			createCapabilities();
 			if (mode == 1) { // wait for AsyncWorker to finish in mode 1, because it only breaks after the
 							 // glCopyImageSubData call, so everything we render before works
@@ -193,100 +255,22 @@ public class TestingContext {
 					LockSupport.park();
 				render = false;
 
-				glViewport(0, 0, glfw.fbwidth, glfw.fbheight);
+				glViewport(0, 0, fbwidth, fbheight);
 				glClearColor(1F, 0F, 0F, 0.5F);
 				glClear(GL_COLOR_BUFFER_BIT);
-				glfwSwapBuffers(glfw.mainWindow);
+				glfwSwapBuffers(mainWindow);
 
 				phaser.arriveAndAwaitAdvance(); // Used for mode 2, where we synchronize this
 			}
 			destroyCapabilities();
 			glfwMakeContextCurrent(0);
-		}
 
-	}
-
-	private static class GLFWThread extends Thread {
-
-		private volatile boolean exit = false;
-
-		private final CountDownLatch latch = new CountDownLatch(1);
-
-		private volatile long mainWindow;
-
-		private volatile long secondary;
-
-		private volatile int fbwidth;
-
-		private volatile int fbheight;
-
-		public GLFWThread() {
-			setName("GLFW-Thread");
-		}
-
-		@Override
-		public void run() {
-			glfwInit();
-
-			GLFWErrorCallback.createPrint().set();
-
-			// Window hints to use opengl es and core profile
-			glfwDefaultWindowHints();
-			glfwWindowHint(GLFW_VISIBLE, GLFW_FALSE);
-			glfwWindowHint(GLFW_TRANSPARENT_FRAMEBUFFER, GLFW_TRUE);
-
-			if (!disableExplicitVersion) {
-				// These two lines are part of the problem, remove them and it works.
-				glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
-				glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 6);
+			try {
+				async.join();
+			} catch (InterruptedException ex) {
+				ex.printStackTrace();
 			}
-
-			mainWindow = glfwCreateWindow(400, 400, "testing", 0, 0);
-			secondary = glfwCreateWindow(1, 1, "unused", 0, mainWindow);
-
-			glfwSetFramebufferSizeCallback(mainWindow, new GLFWFramebufferSizeCallbackI() {
-
-				@Override
-				public void invoke(long window, int width, int height) {
-					fbwidth = width;
-					fbheight = height;
-
-					// Signal redraw
-					render.render = true;
-					LockSupport.unpark(render);
-				}
-
-			});
-			glfwSetWindowCloseCallback(mainWindow, new GLFWWindowCloseCallbackI() {
-
-				@Override
-				public void invoke(long window) {
-					render.exit = true;
-					render.render = true;
-					LockSupport.unpark(render);
-				}
-
-			});
-			IntBuffer w = memAllocInt(1);
-			IntBuffer h = memAllocInt(1);
-			glfwGetFramebufferSize(mainWindow, w, h);
-			fbwidth = w.get(0);
-			fbheight = h.get(0);
-			memFree(w);
-			memFree(h);
-
-			glfwShowWindow(mainWindow);
-
-			latch.countDown(); // Let other threads work
-
-			while (!exit) {
-				glfwWaitEventsTimeout(0.1D); // With timeout to allow exit even on no new events. glfwPostEmptyEvent is
-											 // bugged idk why
-				glfwPollEvents();
-			}
-			glfwDestroyWindow(mainWindow);
-			glfwDestroyWindow(secondary);
-			glfwTerminate();
+			TestingContext.exit = true;
 		}
 
 	}
