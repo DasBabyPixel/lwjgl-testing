@@ -13,7 +13,6 @@ import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.IntBuffer;
 import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.Phaser;
 import java.util.concurrent.locks.LockSupport;
 
 import javax.imageio.ImageIO;
@@ -46,11 +45,7 @@ public class TestingContext {
 
 	private static volatile boolean exit = false;
 
-	private static int mode = 1; // 0 does work (it does not call glCopyImageSubData),
-								 // 1 does not work (resizing can cause it to sometimes render, but very rarely
-								 // and not the entire screen but just a part),
-								 // 2 does not work (works at first, but breaks
-								 // some time after resizing)
+	private static int mode = 1; // 0 does not work, 1 does work
 
 	public static void main(String[] args) throws InterruptedException {
 		Configuration.OPENGLES_EXPLICIT_INIT.set(true);
@@ -107,8 +102,8 @@ public class TestingContext {
 
 		glfwShowWindow(mainWindow);
 
-		async.start();
 		render.start();
+		async.start();
 
 		while (!exit) {
 			glfwWaitEventsTimeout(0.1D); // With timeout to allow exit even on no new events. glfwPostEmptyEvent is
@@ -116,19 +111,20 @@ public class TestingContext {
 			glfwPollEvents();
 		}
 
-		glfwDestroyWindow(mainWindow);
 		glfwDestroyWindow(secondary);
+		glfwDestroyWindow(mainWindow);
 
 		GL.destroy();
 		glfwTerminate();
 	}
 
-	private static void createCapabilities() {
+	private static void createCapabilities(long window) {
+		glfwMakeContextCurrent(window);
 		GL.createCapabilities();
 	}
 
 	private static void destroyCapabilities() {
-		GL.setCapabilities(null);
+		glfwMakeContextCurrent(NULL);
 	}
 
 	private static class AsyncWorker extends Thread {
@@ -141,13 +137,9 @@ public class TestingContext {
 
 		@Override
 		public void run() {
-			glfwMakeContextCurrent(secondary);
-			createCapabilities();
+			createCapabilities(secondary);
 
 			System.out.println(glGetInteger(GL_MAJOR_VERSION) + "." + glGetInteger(GL_MINOR_VERSION));
-
-			if (mode == 2)
-				render.phaser.awaitAdvance(render.phaser.arriveAndDeregister());
 
 			ByteBuffer data = memAlloc(Integer.BYTES * 2 * 2);
 			Color c = new Color(/* g */0.1F, /* b */0.2F, /* a */0.7F, /* r */0.9F);
@@ -155,6 +147,7 @@ public class TestingContext {
 			for (int i = 0; i < 2 * 2; i++) {
 				data.putInt(rgba);
 			}
+			System.out.println("a2");
 			data.flip();
 
 			int id1 = glGenTextures();
@@ -163,6 +156,7 @@ public class TestingContext {
 			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
 			glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 2, 2, 0, GL_RGBA, GL_UNSIGNED_BYTE, data);
 			memFree(data);
+			System.out.println("a3");
 
 			int id2 = glGenTextures();
 			glBindTexture(GL_TEXTURE_2D, id2);
@@ -171,8 +165,8 @@ public class TestingContext {
 			glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 3, 3, 0, GL_RGBA, GL_UNSIGNED_BYTE, (ByteBuffer) null);
 			glBindTexture(GL_TEXTURE_2D, 0);
 
-			if (mode != 0)
-				glCopyImageSubData(id1, GL_TEXTURE_2D, 0, 0, 0, 0, id2, GL_TEXTURE_2D, 0, 0, 0, 0, 2, 2, 1);
+			System.out.println("Copy");
+			glCopyImageSubData(id1, GL_TEXTURE_2D, 0, 0, 0, 0, id2, GL_TEXTURE_2D, 0, 0, 0, 0, 2, 2, 1);
 
 			if (writeTextures) {
 				write(id1, "img1.png");
@@ -184,11 +178,16 @@ public class TestingContext {
 
 			glFlush();
 			glFinish();
-
 			latch.countDown();
+			
+			try {
+				render.latch.await();
+			} catch (InterruptedException ex) {
+				ex.printStackTrace();
+			}
 
 			destroyCapabilities();
-			glfwMakeContextCurrent(0);
+
 		}
 
 		private void write(int tex, String name) {
@@ -230,7 +229,7 @@ public class TestingContext {
 
 		private volatile boolean render = true;
 
-		private final Phaser phaser = new Phaser(Math.max(1, mode));
+		private final CountDownLatch latch = new CountDownLatch(1);
 
 		public RenderThread() {
 			setName("RenderThread");
@@ -238,15 +237,16 @@ public class TestingContext {
 
 		@Override
 		public void run() {
-			glfwMakeContextCurrent(mainWindow);
-			createCapabilities();
-			if (mode == 1) { // wait for AsyncWorker to finish in mode 1, because it only breaks after the
-							 // glCopyImageSubData call, so everything we render before works
-				try {
-					async.latch.await();
-				} catch (InterruptedException ex) {
-					ex.printStackTrace();
-				}
+			createCapabilities(mainWindow);
+			try {
+				System.out.println("wait");
+				async.latch.await();
+				System.out.println("waitdone");
+			} catch (InterruptedException ex) {
+				ex.printStackTrace();
+			}
+			if (mode == 1) {
+				glfwMakeContextCurrent(glfwGetCurrentContext());
 			}
 			while (!exit) {
 
@@ -260,11 +260,9 @@ public class TestingContext {
 				glClear(GL_COLOR_BUFFER_BIT);
 				glfwSwapBuffers(mainWindow);
 
-				phaser.arriveAndAwaitAdvance(); // Used for mode 2, where we synchronize this
 			}
 			destroyCapabilities();
-			glfwMakeContextCurrent(0);
-
+			latch.countDown();
 			try {
 				async.join();
 			} catch (InterruptedException ex) {
